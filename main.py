@@ -1,5 +1,5 @@
-domain = "https://www.youtube.com/"
-r = 22
+domain = input("Enter a full url adress: ")
+r = 26
 
 def qr_field(version):
     global size, reserved
@@ -26,6 +26,16 @@ alignment = [
     [1,1,1,1,1]
 ]
 
+FORMAT_INFO_M = {
+    0: [1,0,1,0,1,0,0,0,0,0,1,0,0,1,0],
+    1: [1,0,1,0,0,0,1,0,1,1,0,0,1,0,1],
+    2: [1,0,1,1,1,1,0,1,1,0,0,1,0,0,0],
+    3: [1,0,1,1,0,1,1,1,0,1,1,1,1,1,1],
+    4: [1,0,0,0,1,0,1,1,0,1,0,1,1,0,0],
+    5: [1,0,0,0,0,0,0,1,1,0,1,1,0,1,1],
+    6: [1,0,0,1,1,1,1,0,1,1,1,0,1,1,0],
+    7: [1,0,0,1,0,1,0,0,0,0,0,0,0,0,1],
+}
 
 def get_ord(i:str) -> list[int]:
     asci = []
@@ -83,7 +93,7 @@ def gf_poly_mul(a:list[int], b:list[int]) -> list[int]:
 
 def gen_poly():
     g = [1]
-    for i in range(1, r + 1):
+    for i in range(0, r):
         g = gf_poly_mul(g, [exp_table[i], 1])
 
     return g
@@ -105,22 +115,17 @@ def sys_rs(control,ord):
     return d
 
 
-def get_qr_version(i:list[int]) -> int:
-    bites = len(i)
-    if bites <= 14:
-        return 1
-    elif bites <=26:
-        return 2
-    elif bites <= 42:
-        return 3
-    elif bites <= 62:
-        return 4
-    elif bites <= 84:
-        return 5
-    elif bites <= 106:
-        return 6
-    else:
-        return 0
+def get_qr_version(data):
+    length = len(data)
+    if length <= 16: return 1
+    elif length <= 28: return 2
+    elif length <= 44: return 3
+    elif length <= 64: return 4
+    elif length <= 86: return 5
+    elif length <= 108: return 6
+    else: return 0
+
+
 
 # qr needs
 
@@ -161,19 +166,39 @@ def get_qr_with_finders(grid):
 
 
 # qr data
-def bits(i:list[int]) -> list[int]:
-    data_bites = []
-    data_info_bites = [0,1,0,0]
 
+def make_data_bytes(url_bytes):
+    # kroky 1-4 (to co už máš)
+    bit_stream = [0, 1, 0, 0]  # mode indicator
 
-    for byte in i:
+    for bit in bin(len(url_bytes))[2:].zfill(8):  # character count
+        bit_stream.append(int(bit))
+
+    for byte in url_bytes:  # data
         for bit in bin(byte)[2:].zfill(8):
-            data_bites.append(int(bit))
+            bit_stream.append(int(bit))
 
-    for bit in bin(len(i))[2:].zfill(8):
-        data_info_bites.append(int(bit))
+    bit_stream += [0, 0, 0, 0]  # terminator
 
-    return data_info_bites + data_bites + [0,0,0,0]
+    # krok 5 — padding
+    while len(bit_stream) % 8 != 0:  # zarovnat na celý bajt
+        bit_stream.append(0)
+
+    pads = [[1, 1, 1, 0, 1, 1, 0, 0], [0, 0, 0, 1, 0, 0, 0, 1]]
+    pad_index = 0
+    while len(bit_stream) < 352:  # 44 bajtů = 352 bitů
+        bit_stream.extend(pads[pad_index])
+        pad_index = (pad_index + 1) % 2
+
+
+    data_bytes = []
+    for i in range(0, len(bit_stream), 8):
+        byte = 0
+        for j in range(8):
+            byte = (byte << 1) | bit_stream[i + j]
+        data_bytes.append(byte)
+
+    return data_bytes
 
 def reserve_areas():
     # levý horní 9x9
@@ -213,27 +238,95 @@ def place_data(grid, data_bits):
         going_up = not going_up
         col -= 2
 
+def apply_mask(grid):
+    for row in range(size):
+        for col in range(size):
+            if not reserved[row][col]:
+                if (row + col) % 2 == 0:
+                    grid[row][col] ^= 1
+
+
+def place_format_info(grid,mask=0):
+    format_bits = FORMAT_INFO_M[mask]
+
+
+    for i in range(6):
+        grid[8][i] = format_bits[i]
+
+    grid[8][7] = format_bits[6]
+
+    grid[8][8] = format_bits[7]
+
+    grid[7][8] = format_bits[8]
+
+    for i in range(6):
+        grid[5 - i][8] = format_bits[9 + i]
+
+
+    for i in range(8):
+        grid[size - 1 - i][8] = format_bits[i]
+
+    for i in range(7):
+        grid[8][size - 7 + i] = format_bits[8 + i]
+
+from PIL import Image
+
+def save_qr_png(grid, filename="qr.png", scale=10, border=4):
+    s = len(grid)
+    total = (s + 2 * border) * scale
+    img = Image.new("1", (total, total), 1)
+    for row in range(s):
+        for col in range(s):
+            if grid[row][col] == 1:
+                for x in range(scale):
+                    for y in range(scale):
+                        img.putpixel(((col + border) * scale + x, (row + border) * scale + y), 0)
+    img.save(filename)
+
+def rs_encode(data_bytes):
+    g = gen_poly()
+    reversed_data = data_bytes[::-1]
+    shifted = [0] * r + reversed_data
+    ec_reversed = gf_poly_div(shifted, g)
+    return ec_reversed[::-1]
+
 def main():
     get_exp_table()
     get_log_table()
 
-    shifted = r_shift(get_ord(domain))
-    g = gen_poly()
-    remainder = gf_poly_div(shifted, g)
-    codeword = sys_rs(remainder, get_ord(domain))
+    data_bytes = make_data_bytes(get_ord(domain))
 
-    grid = qr_field(get_qr_version(codeword))
+
+    ec_bytes = rs_encode(data_bytes)
+
+    final = data_bytes + ec_bytes  # 70 bajtů
+
+
+    final_bits = []
+    for byte in final:
+        for bit in bin(byte)[2:].zfill(8):
+            final_bits.append(int(bit))
+
+    version = get_qr_version(data_bytes)
+    grid = qr_field(version)
 
     get_qr_with_finders(grid)
     qr_timing_patterns(grid)
-    qr_aligments(grid,get_qr_version(codeword))
+    qr_aligments(grid, version)
     qr_dark_module(grid)
-    place_data(grid,bits(codeword))
+    reserve_areas()
+    place_data(grid, final_bits)
+    apply_mask(grid)
+    place_format_info(grid)
 
     for row in grid:
-        print("".join("██" if cell == 1 else "  " for cell in row))
+        print("".join("█" if cell == 1 else " " for cell in row))
 
-    print(len(bits(codeword)))
+
+    print(len(final_bits))
+    print(size)
+    print(version)
+    save_qr_png(grid, "/home/filip/workspace/QRcode/qr.png")
 
 
 
